@@ -3639,31 +3639,238 @@
             }
             // Check for MPD URL
             if (url.includes('.mpd')) {
+                // Reset any existing dash player
                 if (dashPlayer) {
                     dashPlayer.reset();
+                    dashPlayer = null;
                 }
+                
+                // Hide Plyr controls for DASH content as dash.js will handle it
+                if (playerInstance) {
+                    playerInstance.pause();
+                }
+                
+                // Create new dash player
                 dashPlayer = dashjs.MediaPlayer().create();
-                if (drmConfig) {
-                    dashPlayer.setProtectionData(drmConfig);
-                }
-
-                // Add more robust error handling
-                dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e) => {
-                    console.error('DASH Player Error:', e);
-                    if (e.error && e.error.code === 17) { // NETWORK_ERROR
-                        elements.playerMessageArea.textContent = 'Network error. Retrying...';
-                        elements.playerMessageArea.style.display = 'block';
-                        safeSetTimeout(() => dashPlayer.initialize(elements.player, url, true), 3000);
-                    } else if (e.error && e.error.message) {
-                        elements.playerMessageArea.textContent = `Error: ${e.error.message}`;
-                        elements.playerMessageArea.style.display = 'block';
-                    } else {
-                        elements.playerMessageArea.textContent = 'An unknown error occurred with the video stream.';
-                        elements.playerMessageHessageArea.style.display = 'block';
+                
+                // Configure DASH player settings
+                dashPlayer.getDebug().setLogToBrowserConsole(true);
+                dashPlayer.updateSettings({
+                    'debug': {
+                        'logLevel': dashjs.Debug.LOG_LEVEL_WARNING
+                    },
+                    'streaming': {
+                        'retryAttempts': {
+                            'MPD': 3,
+                            'XHR': 3,
+                            'MediaSegment': 3
+                        },
+                        'retryIntervals': {
+                            'MPD': 500,
+                            'XHR': 1000,
+                            'MediaSegment': 1000
+                        },
+                        'abandonLoadTimeout': 10000,
+                        'wallclockTimeUpdateInterval': 100,
+                        'bufferTimeDefault': 30,
+                        'bufferAheadToKeep': 30
                     }
                 });
 
-                dashPlayer.initialize(elements.player, url, true);
+                // Set up DRM if provided
+                if (drmConfig) {
+                    console.log('Setting up DRM configuration for MPD stream');
+                    dashPlayer.setProtectionData(drmConfig);
+                }
+
+                // Enhanced error handling with specific error types
+                dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e) => {
+                    console.error('DASH Player Error:', e);
+                    let errorMessage = 'Unknown playback error';
+                    
+                    if (e.error) {
+                        switch(e.error.code) {
+                            case 17: // NETWORK_ERROR
+                                errorMessage = 'Network connection error. Checking connectivity...';
+                                elements.playerMessageArea.textContent = errorMessage;
+                                elements.playerMessageArea.style.display = 'block';
+                                // Retry after 3 seconds
+                                safeSetTimeout(() => {
+                                    elements.playerMessageArea.textContent = 'Retrying connection...';
+                                    dashPlayer.initialize(elements.player, url, true);
+                                }, 3000);
+                                return;
+                            case 25: // KEY_SYSTEM_ACCESS_DENIED
+                                errorMessage = 'DRM license error. Your device may not support this content protection.';
+                                break;
+                            case 26: // KEY_SESSION_CREATION_ERROR
+                                errorMessage = 'DRM session creation failed. Please try refreshing the page.';
+                                break;
+                            case 27: // KEY_LOAD_ERROR
+                                errorMessage = 'License server error. Please try again later.';
+                                break;
+                            default:
+                                if (e.error.message) {
+                                    errorMessage = `Playback error: ${e.error.message}`;
+                                }
+                        }
+                    }
+                    
+                    elements.playerMessageArea.textContent = errorMessage;
+                    elements.playerMessageArea.style.display = 'block';
+                    console.error('DASH Error Details:', e.error);
+                });
+
+                // Handle successful initialization
+                dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+                    console.log('DASH stream initialized successfully');
+                    elements.playerMessageArea.style.display = 'none';
+                    
+                    // Log available tracks for debugging
+                    const videoTracks = dashPlayer.getBitrateInfoListFor('video');
+                    const audioTracks = dashPlayer.getBitrateInfoListFor('audio');
+                    console.log('Available video tracks:', videoTracks);
+                    console.log('Available audio tracks:', audioTracks);
+                    
+                    if (videoTracks.length === 0 && audioTracks.length === 0) {
+                        elements.playerMessageArea.textContent = 'No playable video or audio tracks available in this stream.';
+                        elements.playerMessageArea.style.display = 'block';
+                    } else if (videoTracks.length === 0) {
+                        console.warn('No video tracks available - audio only stream');
+                    } else if (audioTracks.length === 0) {
+                        console.warn('No audio tracks available - video only stream');
+                    }
+                });
+
+                // Handle playback started
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
+                    console.log('DASH playback started');
+                    elements.playerMessageArea.style.display = 'none';
+                    
+                    // Additional debugging info when playback actually starts
+                    const currentTime = dashPlayer.time();
+                    const duration = dashPlayer.duration();
+                    console.log(`Playback started - Current time: ${currentTime}, Duration: ${duration}`);
+                });
+
+                // Monitor playback progress to detect if it's actually playing
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_TIME_UPDATED, (e) => {
+                    // Only log occasionally to avoid spam
+                    if (e.time && e.time % 10 < 0.5) { // Every ~10 seconds
+                        console.log(`Playback progress: ${e.time.toFixed(1)}s / ${dashPlayer.duration().toFixed(1)}s`);
+                    }
+                });
+
+                // Handle seeking events
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_SEEKING, () => {
+                    console.log('Seeking in progress...');
+                });
+
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_SEEKED, () => {
+                    console.log('Seek completed');
+                });
+
+                // Handle pause/play events
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_PAUSED, () => {
+                    console.log('Playback paused');
+                });
+
+                dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_PLAYING, () => {
+                    console.log('Playback resumed/started');
+                });
+
+                // Handle buffer events
+                dashPlayer.on(dashjs.MediaPlayer.events.BUFFER_EMPTY, (e) => {
+                    console.log('Buffer empty for media type:', e.mediaType);
+                    if (e.mediaType === 'video') {
+                        elements.playerMessageArea.textContent = 'Video buffering...';
+                        elements.playerMessageArea.style.display = 'block';
+                    }
+                });
+
+                dashPlayer.on(dashjs.MediaPlayer.events.BUFFER_LOADED, (e) => {
+                    console.log('Buffer loaded for media type:', e.mediaType);
+                    // Hide buffer message when both video and audio are loaded
+                    safeSetTimeout(() => {
+                        const videoBuffer = dashPlayer.getBufferLength('video');
+                        const audioBuffer = dashPlayer.getBufferLength('audio');
+                        if (videoBuffer > 0 || audioBuffer > 0) {
+                            elements.playerMessageArea.style.display = 'none';
+                        }
+                    }, 1000);
+                });
+
+                // Handle quality changes
+                dashPlayer.on(dashjs.MediaPlayer.events.QUALITY_CHANGE_RENDERED, (e) => {
+                    console.log(`Quality changed for ${e.mediaType}: ${e.newQuality} (bitrate: ${e.newBitrate})`);
+                });
+
+                // Handle DRM events
+                dashPlayer.on(dashjs.MediaPlayer.events.KEY_SYSTEM_SELECTED, (e) => {
+                    console.log('DRM Key system selected:', e.data);
+                    elements.playerMessageArea.textContent = 'Setting up content protection...';
+                    elements.playerMessageArea.style.display = 'block';
+                });
+
+                dashPlayer.on(dashjs.MediaPlayer.events.KEY_SESSION_CREATED, () => {
+                    console.log('DRM Key session created successfully');
+                    elements.playerMessageArea.textContent = 'Content protection initialized...';
+                });
+
+                dashPlayer.on(dashjs.MediaPlayer.events.KEY_STATUSES_CHANGED, (e) => {
+                    console.log('DRM Key status changed:', e.data);
+                    const hasUsableKeys = Object.values(e.data).some(status => status === 'usable');
+                    if (hasUsableKeys) {
+                        elements.playerMessageArea.textContent = 'Licenses acquired, starting playback...';
+                    }
+                });
+
+                // Handle manifest loaded
+                dashPlayer.on(dashjs.MediaPlayer.events.MANIFEST_LOADED, (e) => {
+                    console.log('MPD manifest loaded:', e.data);
+                    const manifest = e.data;
+                    
+                    // Check if manifest has video/audio tracks
+                    if (manifest && manifest.Period && manifest.Period.length > 0) {
+                        const period = manifest.Period[0];
+                        const hasVideo = period.AdaptationSet?.some(as => as.contentType === 'video' || as.mimeType?.includes('video'));
+                        const hasAudio = period.AdaptationSet?.some(as => as.contentType === 'audio' || as.mimeType?.includes('audio'));
+                        
+                        if (!hasVideo && !hasAudio) {
+                            elements.playerMessageArea.textContent = 'No playable video or audio tracks found in this stream.';
+                            elements.playerMessageArea.style.display = 'block';
+                        }
+                    }
+                });
+
+                // Enhanced initialization with error catching
+                try {
+                    elements.playerMessageArea.textContent = 'Loading MPD stream...';
+                    elements.playerMessageArea.style.display = 'block';
+                    
+                    // Initialize the DASH player
+                    dashPlayer.initialize(elements.player, url, true);
+                    
+                    // Set up a timeout to detect if initialization fails silently
+                    const initTimeout = safeSetTimeout(() => {
+                        if (dashPlayer && !dashPlayer.isReady()) {
+                            console.warn('DASH player initialization timeout');
+                            elements.playerMessageArea.textContent = 'Stream loading timeout. Please check the MPD URL and try again.';
+                            elements.playerMessageArea.style.display = 'block';
+                        }
+                    }, 15000); // 15 second timeout
+
+                    // Clear timeout when stream starts
+                    dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
+                        safeClearTimeout(initTimeout);
+                    });
+                    
+                } catch (error) {
+                    console.error('Failed to initialize DASH player:', error);
+                    elements.playerMessageArea.textContent = 'Failed to initialize media player. Please try a different stream.';
+                    elements.playerMessageArea.style.display = 'block';
+                }
+                
                 return;
             }
 
@@ -3753,7 +3960,8 @@
                     if (server.url.includes('.mpd')) {
                         // Validate DRM config before applying
                         const validatedDrmConfig = validateDrmConfig(drmConfig, server.url);
-                        playUrl(server.url, validatedDrmConfig);
+                        // Use enhanced MPD playback with diagnostics
+                        playMpdWithDiagnostics(server.url, validatedDrmConfig);
                         hasSpecialSource = true;
                         break;
                     }
@@ -4687,6 +4895,120 @@
             }
         }
         // --- End Stretch Functionality ---
+
+        // Test MPD stream accessibility and diagnose issues
+        async function diagnoseMpdStream(url) {
+            console.log('Diagnosing MPD stream:', url);
+            
+            try {
+                // Test if the MPD manifest is accessible
+                const response = await fetch(url, {
+                    method: 'HEAD',
+                    mode: 'cors'
+                });
+                
+                if (!response.ok) {
+                    console.error('MPD manifest not accessible:', response.status, response.statusText);
+                    return {
+                        success: false,
+                        error: `MPD manifest returned ${response.status}: ${response.statusText}`
+                    };
+                }
+                
+                // Check content type
+                const contentType = response.headers.get('content-type');
+                if (contentType && !contentType.includes('xml') && !contentType.includes('mpd')) {
+                    console.warn('Unexpected content type for MPD:', contentType);
+                }
+                
+                // Try to fetch the actual manifest content
+                const manifestResponse = await fetch(url);
+                const manifestText = await manifestResponse.text();
+                
+                // Basic MPD validation
+                if (!manifestText.includes('<MPD') && !manifestText.includes('<?xml')) {
+                    return {
+                        success: false,
+                        error: 'Invalid MPD format - does not appear to be valid XML/MPD'
+                    };
+                }
+                
+                // Check for common required elements
+                const hasMediaPresentationDuration = manifestText.includes('mediaPresentationDuration');
+                const hasPeriod = manifestText.includes('<Period');
+                const hasAdaptationSet = manifestText.includes('<AdaptationSet');
+                
+                if (!hasPeriod) {
+                    return {
+                        success: false,
+                        error: 'Invalid MPD - missing Period element'
+                    };
+                }
+                
+                if (!hasAdaptationSet) {
+                    return {
+                        success: false,
+                        error: 'Invalid MPD - missing AdaptationSet element'
+                    };
+                }
+                
+                // Check for DRM indicators
+                const hasDRM = manifestText.includes('ContentProtection') || 
+                              manifestText.includes('cenc:') ||
+                              manifestText.includes('widevine') ||
+                              manifestText.includes('playready');
+                
+                console.log('MPD Diagnosis Results:', {
+                    accessible: true,
+                    contentType,
+                    hasDuration: hasMediaPresentationDuration,
+                    hasPeriod,
+                    hasAdaptationSet,
+                    hasDRM,
+                    size: manifestText.length
+                });
+                
+                return {
+                    success: true,
+                    details: {
+                        contentType,
+                        hasDRM,
+                        manifestSize: manifestText.length
+                    }
+                };
+                
+            } catch (error) {
+                console.error('MPD diagnosis failed:', error);
+                return {
+                    success: false,
+                    error: `Network error: ${error.message}`
+                };
+            }
+        }
+
+        // Enhanced MPD playback with pre-flight checks
+        async function playMpdWithDiagnostics(url, drmConfig = null) {
+            // Run diagnostics first
+            const diagnosis = await diagnoseMpdStream(url);
+            
+            if (!diagnosis.success) {
+                elements.playerMessageArea.textContent = `MPD Stream Error: ${diagnosis.error}`;
+                elements.playerMessageArea.style.display = 'block';
+                console.error('MPD diagnostics failed:', diagnosis.error);
+                return;
+            }
+            
+            // If DRM is detected but no config provided
+            if (diagnosis.details.hasDRM && !drmConfig) {
+                elements.playerMessageArea.textContent = 'This stream requires DRM license configuration.';
+                elements.playerMessageArea.style.display = 'block';
+                console.warn('DRM-protected stream detected but no DRM config provided');
+                return;
+            }
+            
+            // Proceed with normal playback
+            playUrl(url, drmConfig);
+        }
 
     </script>
 
