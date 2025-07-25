@@ -3404,7 +3404,10 @@
                 currentSeries = content;
 
                 if (content.type !== 'series' && content.Servers) {
-                    updatePlayerSource(content.Servers, content.mpdDrm);
+                    // Small delay to ensure player is ready
+                    safeSetTimeout(() => {
+                        updatePlayerSource(content.Servers, content.mpdDrm);
+                    }, 100);
                 }
                 elements.seasonsGrid.innerHTML = '';
 
@@ -3478,6 +3481,9 @@
                         default: 720,
                         options: [1080, 720, 480, 360, 240],
                     },
+                    autoplay: true,
+                    muted: true, // Required for autoplay in most browsers
+                    preload: 'metadata'
                 });
 
                 playerInstance.once('ready', event => {
@@ -3848,8 +3854,32 @@
                     elements.playerMessageArea.textContent = 'Loading MPD stream...';
                     elements.playerMessageArea.style.display = 'block';
                     
-                    // Initialize the DASH player
+                    // Ensure video element is ready for autoplay
+                    elements.player.autoplay = true;
+                    elements.player.muted = true; // Required for autoplay in many browsers
+                    
+                    // Initialize the DASH player with autoplay enabled
                     dashPlayer.initialize(elements.player, url, true);
+                    
+                    // Force play after initialization completes
+                    dashPlayer.on(dashjs.MediaPlayer.events.CAN_PLAY, () => {
+                        console.log('DASH player can play, starting playback');
+                        dashPlayer.play().catch(error => {
+                            console.warn('Autoplay failed, user interaction required:', error);
+                            handleAutoplayFallback();
+                        });
+                    });
+                    
+                    // Also try to play when stream is initialized
+                    dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+                        safeSetTimeout(() => {
+                            if (dashPlayer && !dashPlayer.isPlaying()) {
+                                dashPlayer.play().catch(error => {
+                                    console.warn('Autoplay failed after stream init:', error);
+                                });
+                            }
+                        }, 500);
+                    });
                     
                     // Set up a timeout to detect if initialization fails silently
                     const initTimeout = safeSetTimeout(() => {
@@ -3882,6 +3912,23 @@
                     type: url.includes('m3u8') ? 'application/x-mpegURL' : 'video/mp4'
                 }]
             };
+            
+            // Enable autoplay for regular video content
+            playerInstance.once('ready', () => {
+                // Ensure video element allows autoplay
+                if (elements.player) {
+                    elements.player.autoplay = true;
+                    elements.player.muted = true; // Required for autoplay
+                }
+                
+                // Start playback
+                safeSetTimeout(() => {
+                    playerInstance.play().catch(error => {
+                        console.warn('Autoplay failed for regular video:', error);
+                        handleAutoplayFallback();
+                    });
+                }, 300);
+            });
         }
 
         // Check if URL is YouTube
@@ -4098,7 +4145,24 @@
             updateNavigationButtonsState(); // Update buttons after episode changes
 
             if (autoplay) {
-                                    safeSetTimeout(() => playerInstance.play(), 500); // Delay to allow source to load
+                safeSetTimeout(() => {
+                    try {
+                        // If DASH player is active, use it for autoplay
+                        if (dashPlayer && dashPlayer.isReady()) {
+                            dashPlayer.play().catch(error => {
+                                console.warn('DASH autoplay failed:', error);
+                            });
+                        } 
+                        // Otherwise use Plyr for regular video
+                        else if (playerInstance) {
+                            playerInstance.play().catch(error => {
+                                console.warn('Plyr autoplay failed:', error);
+                            });
+                        }
+                    } catch (error) {
+                        console.warn('Autoplay error:', error);
+                    }
+                }, 500); // Delay to allow source to load
             }
         }
         
@@ -5010,6 +5074,50 @@
             playUrl(url, drmConfig);
         }
 
+        // Fallback autoplay handler for when browser blocks autoplay
+        function handleAutoplayFallback() {
+            // Show a prominent play button if autoplay fails
+            elements.playerMessageArea.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <button onclick="forcePlay()" style="
+                        background: var(--youtube-red);
+                        color: white;
+                        border: none;
+                        padding: 15px 30px;
+                        border-radius: 25px;
+                        font-size: 18px;
+                        cursor: pointer;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    ">
+                        ▶️ Click to Play Video
+                    </button>
+                    <p style="margin-top: 10px; color: var(--light);">
+                        Your browser requires user interaction to start playback
+                    </p>
+                </div>
+            `;
+            elements.playerMessageArea.style.display = 'block';
+        }
+
+        // Force play function for the fallback button
+        function forcePlay() {
+            try {
+                if (dashPlayer && dashPlayer.isReady()) {
+                    dashPlayer.play().then(() => {
+                        elements.playerMessageArea.style.display = 'none';
+                    });
+                } else if (playerInstance) {
+                    playerInstance.play().then(() => {
+                        elements.playerMessageArea.style.display = 'none';
+                    });
+                }
+            } catch (error) {
+                console.error('Force play failed:', error);
+            }
+        }
+
+        // Make forcePlay available globally for the onclick handler
+        window.forcePlay = forcePlay;
     </script>
 
 </body>
