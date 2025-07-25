@@ -46,9 +46,13 @@
                         const type = category.MainCategory.toLowerCase().includes('movie') ? 'movie' : 'series';
                         const tmdbData = await fetchTmdbData(entry.Title, type);
                         const mpdDrm = entry.mpdDrm;
+                        
+                        // Validate and sanitize mpdDrm before preserving it
+                        const sanitizedMpdDrm = sanitizeMpdDrm(mpdDrm);
+                        
                         Object.assign(entry, tmdbData);
-                        if (mpdDrm) {
-                            entry.mpdDrm = mpdDrm;
+                        if (sanitizedMpdDrm) {
+                            entry.mpdDrm = sanitizedMpdDrm;
                         }
                         statusEl.textContent += `\nProcessed: ${entry.Title}`;
                         await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit to avoid overwhelming the API
@@ -88,6 +92,73 @@
                 console.error(`Failed to fetch TMDB data for ${title}:`, error);
             }
             return {};
+        }
+
+        // Validate URL format and prevent malicious URLs
+        function isValidUrl(url) {
+            if (!url || typeof url !== 'string') return false;
+            
+            try {
+                const urlObj = new URL(url);
+                // Only allow http/https protocols
+                if (!['http:', 'https:'].includes(urlObj.protocol)) {
+                    return false;
+                }
+                // Prevent local file access and private IPs
+                if (urlObj.hostname === 'localhost' || 
+                    urlObj.hostname.startsWith('127.') ||
+                    urlObj.hostname.startsWith('192.168.') ||
+                    urlObj.hostname.startsWith('10.') ||
+                    urlObj.hostname.match(/^172\.(1[6-9]|2[0-9]|3[01])\./)) {
+                    return false;
+                }
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // Sanitize and validate mpdDrm configuration
+        function sanitizeMpdDrm(mpdDrm) {
+            if (!mpdDrm || typeof mpdDrm !== 'object') {
+                return null;
+            }
+
+            // Create a safe copy and validate structure
+            const validatedConfig = {};
+            
+            // Validate each DRM system
+            const allowedDrmSystems = ['com.widevine.alpha', 'com.microsoft.playready', 'com.adobe.primetime'];
+            
+            for (const [key, value] of Object.entries(mpdDrm)) {
+                if (allowedDrmSystems.includes(key) && value && typeof value === 'object') {
+                    validatedConfig[key] = {};
+                    
+                    // Validate license server URL
+                    if (value.serverURL && isValidUrl(value.serverURL)) {
+                        validatedConfig[key].serverURL = value.serverURL;
+                    }
+                    
+                    // Validate headers (if present)
+                    if (value.httpRequestHeaders && typeof value.httpRequestHeaders === 'object') {
+                        validatedConfig[key].httpRequestHeaders = {};
+                        // Only allow safe headers
+                        const allowedHeaders = ['authorization', 'content-type', 'x-custom-data'];
+                        for (const [headerKey, headerValue] of Object.entries(value.httpRequestHeaders)) {
+                            if (allowedHeaders.includes(headerKey.toLowerCase()) && 
+                                typeof headerValue === 'string' && 
+                                headerValue.length < 1000) { // Limit header value length
+                                validatedConfig[key].httpRequestHeaders[headerKey] = headerValue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Log DRM validation for audit purposes
+            console.log('DRM config validated during processing');
+            
+            return Object.keys(validatedConfig).length > 0 ? validatedConfig : null;
         }
     </script>
 </body>

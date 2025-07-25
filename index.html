@@ -2687,6 +2687,12 @@
                 if (!response.ok) throw new Error("Online source failed");
 
                 const base64Data = await response.text();
+                
+                // Validate base64 data before processing
+                if (!isValidBase64(base64Data)) {
+                    throw new Error("Invalid base64 data format");
+                }
+                
                 // Use modern TextDecoder instead of deprecated escape() function
                 const binaryString = atob(base64Data);
                 const bytes = new Uint8Array(binaryString.length);
@@ -2694,15 +2700,183 @@
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 const decodedData = new TextDecoder('utf-8').decode(bytes);
-                cineData = JSON.parse(decodedData);
-                console.log("✅ Loaded from LOCAL source");
+                
+                // Validate and sanitize the JSON data
+                const parsedData = JSON.parse(decodedData);
+                cineData = validateAndSanitizeData(parsedData);
+                
+                console.log("✅ Loaded and validated data from source");
 
             } catch (err) {
-                console.error("❌ Both online and offline data failed to load.", err);
+                console.error("❌ Data loading failed:", err);
                 alert("Data loading failed. Please check your internet or local file.");
             } finally {
                 elements.loadingSpinner.style.display = 'none';
             }
+        }
+
+        // Validate base64 format
+        function isValidBase64(str) {
+            if (!str || typeof str !== 'string') return false;
+            try {
+                return btoa(atob(str)) === str;
+            } catch (err) {
+                return false;
+            }
+        }
+
+        // Validate and sanitize the loaded data structure
+        function validateAndSanitizeData(data) {
+            if (!data || typeof data !== 'object' || !Array.isArray(data.Categories)) {
+                throw new Error("Invalid data structure: Missing Categories array");
+            }
+
+            const sanitizedData = {
+                Categories: []
+            };
+
+            for (const category of data.Categories) {
+                if (!category || typeof category !== 'object' || 
+                    !category.MainCategory || !Array.isArray(category.Entries)) {
+                    console.warn("Skipping invalid category:", category);
+                    continue;
+                }
+
+                const sanitizedCategory = {
+                    MainCategory: sanitizeString(category.MainCategory),
+                    Entries: []
+                };
+
+                for (const entry of category.Entries) {
+                    if (!entry || typeof entry !== 'object' || !entry.Title) {
+                        console.warn("Skipping invalid entry:", entry);
+                        continue;
+                    }
+
+                    const sanitizedEntry = {
+                        Title: sanitizeString(entry.Title),
+                        Description: sanitizeString(entry.Description || ''),
+                        Year: sanitizeYear(entry.Year),
+                        Rating: sanitizeRating(entry.Rating),
+                        Country: sanitizeString(entry.Country || ''),
+                        SubCategory: sanitizeString(entry.SubCategory || ''),
+                        Duration: sanitizeString(entry.Duration || ''),
+                        Poster: sanitizeUrl(entry.Poster),
+                        Thumbnail: sanitizeUrl(entry.Thumbnail),
+                        Servers: sanitizeServers(entry.Servers || []),
+                        mpdDrm: sanitizeDrmConfig(entry.mpdDrm)
+                    };
+
+                    // Handle series-specific data
+                    if (entry.Seasons && Array.isArray(entry.Seasons)) {
+                        sanitizedEntry.Seasons = sanitizeSeasons(entry.Seasons);
+                    }
+
+                    sanitizedCategory.Entries.push(sanitizedEntry);
+                }
+
+                if (sanitizedCategory.Entries.length > 0) {
+                    sanitizedData.Categories.push(sanitizedCategory);
+                }
+            }
+
+            return sanitizedData;
+        }
+
+        // Sanitize string inputs
+        function sanitizeString(str) {
+            if (!str || typeof str !== 'string') return '';
+            return str.trim().substring(0, 500); // Limit length to prevent overflow
+        }
+
+        // Sanitize year values
+        function sanitizeYear(year) {
+            if (!year) return '';
+            const yearNum = parseInt(year);
+            if (isNaN(yearNum) || yearNum < 1900 || yearNum > new Date().getFullYear() + 5) {
+                return '';
+            }
+            return yearNum.toString();
+        }
+
+        // Sanitize rating values
+        function sanitizeRating(rating) {
+            if (!rating) return '';
+            const ratingNum = parseFloat(rating);
+            if (isNaN(ratingNum) || ratingNum < 0 || ratingNum > 10) {
+                return '';
+            }
+            return ratingNum.toString();
+        }
+
+        // Sanitize URL inputs
+        function sanitizeUrl(url) {
+            if (!url || typeof url !== 'string') return '';
+            try {
+                const urlObj = new URL(url);
+                if (['http:', 'https:'].includes(urlObj.protocol)) {
+                    return url;
+                }
+            } catch (e) {
+                // Invalid URL, return empty string
+            }
+            return '';
+        }
+
+        // Sanitize server configurations
+        function sanitizeServers(servers) {
+            if (!Array.isArray(servers)) return [];
+            
+            return servers.filter(server => {
+                return server && 
+                       typeof server === 'object' && 
+                       server.url && 
+                       isValidUrl(server.url);
+            }).map(server => ({
+                name: sanitizeString(server.name || 'Server'),
+                url: server.url
+            }));
+        }
+
+        // Sanitize DRM configuration
+        function sanitizeDrmConfig(drmConfig) {
+            if (!drmConfig || typeof drmConfig !== 'object') return null;
+            
+            // Use the existing validateDrmConfig function
+            return validateDrmConfig(drmConfig, 'data-validation');
+        }
+
+        // Sanitize seasons data for series
+        function sanitizeSeasons(seasons) {
+            if (!Array.isArray(seasons)) return [];
+            
+            return seasons.filter(season => {
+                return season && 
+                       typeof season === 'object' && 
+                       season.Season !== undefined &&
+                       Array.isArray(season.Episodes);
+            }).map(season => ({
+                Season: parseInt(season.Season) || 1,
+                SeasonPoster: sanitizeUrl(season.SeasonPoster || ''),
+                Episodes: sanitizeEpisodes(season.Episodes)
+            }));
+        }
+
+        // Sanitize episodes data
+        function sanitizeEpisodes(episodes) {
+            if (!Array.isArray(episodes)) return [];
+            
+            return episodes.filter(episode => {
+                return episode && 
+                       typeof episode === 'object' && 
+                       episode.Title;
+            }).map(episode => ({
+                Episode: parseInt(episode.Episode) || 1,
+                Title: sanitizeString(episode.Title),
+                Description: sanitizeString(episode.Description || ''),
+                Servers: sanitizeServers(episode.Servers || []),
+                mpdDrm: sanitizeDrmConfig(episode.mpdDrm)
+            }));
         }
         
         // Fetches data from TMDB
@@ -3565,13 +3739,21 @@
                 let hasSpecialSource = false;
 
                 for (const server of servers) {
+                    // Validate server URL before processing
+                    if (!isValidUrl(server.url)) {
+                        console.warn('Invalid server URL detected, skipping:', server.url);
+                        continue;
+                    }
+
                     if (isVidsrcUrl(server.url) || isVidjoyUrl(server.url) || isMegaNzUrl(server.url) || isGoogleDriveUrl(server.url)) {
                         playUrl(server.url);
                         hasSpecialSource = true;
                         break;
                     }
                     if (server.url.includes('.mpd')) {
-                        playUrl(server.url, drmConfig);
+                        // Validate DRM config before applying
+                        const validatedDrmConfig = validateDrmConfig(drmConfig, server.url);
+                        playUrl(server.url, validatedDrmConfig);
                         hasSpecialSource = true;
                         break;
                     }
@@ -3588,6 +3770,73 @@
                     };
                 }
             }
+        }
+
+        // Validate URL format and prevent malicious URLs
+        function isValidUrl(url) {
+            if (!url || typeof url !== 'string') return false;
+            
+            try {
+                const urlObj = new URL(url);
+                // Only allow http/https protocols
+                if (!['http:', 'https:'].includes(urlObj.protocol)) {
+                    return false;
+                }
+                // Prevent local file access and private IPs
+                if (urlObj.hostname === 'localhost' || 
+                    urlObj.hostname.startsWith('127.') ||
+                    urlObj.hostname.startsWith('192.168.') ||
+                    urlObj.hostname.startsWith('10.') ||
+                    urlObj.hostname.match(/^172\.(1[6-9]|2[0-9]|3[01])\./)) {
+                    return false;
+                }
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // Validate and sanitize DRM configuration
+        function validateDrmConfig(drmConfig, contentUrl) {
+            if (!drmConfig || typeof drmConfig !== 'object') {
+                return null;
+            }
+
+            // Create a safe copy and validate structure
+            const validatedConfig = {};
+            
+            // Validate each DRM system
+            const allowedDrmSystems = ['com.widevine.alpha', 'com.microsoft.playready', 'com.adobe.primetime'];
+            
+            for (const [key, value] of Object.entries(drmConfig)) {
+                if (allowedDrmSystems.includes(key) && value && typeof value === 'object') {
+                    validatedConfig[key] = {};
+                    
+                    // Validate license server URL
+                    if (value.serverURL && isValidUrl(value.serverURL)) {
+                        validatedConfig[key].serverURL = value.serverURL;
+                    }
+                    
+                    // Validate headers (if present)
+                    if (value.httpRequestHeaders && typeof value.httpRequestHeaders === 'object') {
+                        validatedConfig[key].httpRequestHeaders = {};
+                        // Only allow safe headers
+                        const allowedHeaders = ['authorization', 'content-type', 'x-custom-data'];
+                        for (const [headerKey, headerValue] of Object.entries(value.httpRequestHeaders)) {
+                            if (allowedHeaders.includes(headerKey.toLowerCase()) && 
+                                typeof headerValue === 'string' && 
+                                headerValue.length < 1000) { // Limit header value length
+                                validatedConfig[key].httpRequestHeaders[headerKey] = headerValue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Log DRM validation for audit purposes
+            console.log('DRM config validated for content:', contentUrl.substring(0, 50) + '...');
+            
+            return Object.keys(validatedConfig).length > 0 ? validatedConfig : null;
         }
         
         // Open season
